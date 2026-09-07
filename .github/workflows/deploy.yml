@@ -1,0 +1,59 @@
+﻿name: Enterprise CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: my-generic-app
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 2. Secret Scanning (TruffleHog)
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+
+      - name: 3. Build Docker Image
+        run: docker build -t ${{ env.ECR_REPOSITORY }}:${{ github.sha }} .
+
+      - name: 4. Vulnerability Scanning (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.ECR_REPOSITORY }}:${{ github.sha }}'
+          format: 'table'
+          exit-code: '1' 
+          severity: 'CRITICAL,HIGH'
+
+      - name: 5. Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::111122223333:role/GitHubActionsRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 6. Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 7. Tag and Push image to Amazon ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker tag ${{ env.ECR_REPOSITORY }}:$IMAGE_TAG $REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+          docker tag ${{ env.ECR_REPOSITORY }}:$IMAGE_TAG $REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+          docker push -a $REGISTRY/${{ env.ECR_REPOSITORY }}
